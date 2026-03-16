@@ -1,0 +1,33 @@
+# Secrets — never bake into image
+.env
+.env.*
+
+# Virtual environment — image installs fresh via pip
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Dev/test artefacts
+.pytest_cache/
+.coverage
+qdrant_data/
+
+# Version control & tooling
+.git/
+.claude/
+
+# Config files not needed at runtime
+.gitignore
+.dockerignore
+.gcloudignore
+docker/
+README.md
+
+# Logs
+*.log

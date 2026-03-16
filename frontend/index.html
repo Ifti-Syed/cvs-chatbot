@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CVS – CVS Certification Assistant</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+    rel="stylesheet"
+  />
+</head>
+<body>
+  <div class="app-shell" id="appShell">
+
+    <!-- ===================== SIDEBAR ========================== -->
+    <aside class="sidebar" id="sidebar">
+
+      <!-- Logo -->
+      <div class="sidebar-header">
+        <div class="brand">
+          <div class="brand-icon" aria-hidden="true">
+            <!-- CVS ventilation fan icon in brand blue -->
+            <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="20" cy="20" r="3" fill="#1863DC"/>
+              <path d="M20 17C20 12 15 9 12 12C15 15 16 17 20 17Z" fill="#1863DC"/>
+              <path d="M23 20C28 20 31 15 28 12C25 15 23 16 23 20Z" fill="#1863DC" opacity="0.75"/>
+              <path d="M20 23C20 28 25 31 28 28C25 25 24 23 20 23Z" fill="#1863DC" opacity="0.55"/>
+              <path d="M17 20C12 20 9 25 12 28C15 25 17 24 17 20Z" fill="#1863DC" opacity="0.38"/>
+            </svg>
+          </div>
+          <div class="brand-text">
+            <span class="brand-name">CVS</span>
+            <span class="brand-tagline">Central Ventilation System</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- New Chat Button -->
+      <div class="sidebar-actions">
+        <button class="btn-new-chat" id="btnNewChat" title="Start a new conversation">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+          New Chat
+        </button>
+      </div>
+
+      <!-- Chat History -->
+      <div class="sidebar-section-label">Recent</div>
+      <nav class="chat-history" id="chatHistory" aria-label="Chat history">
+        <div class="history-empty" id="historyEmpty">No recent conversations</div>
+      </nav>
+
+      <!-- Spacer pushes footer to bottom -->
+      <div class="sidebar-spacer"></div>
+
+      <!-- Footer — company name only, no tool branding -->
+      <div class="sidebar-footer">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M12 8v4l3 3"/>
+        </svg>
+        <span>&copy; Central Ventilation System</span>
+      </div>
+
+    </aside>
+
+    <!-- ===================== MAIN AREA ======================== -->
+    <main class="main-area" id="mainArea">
+
+      <!-- Header bar -->
+      <header class="chat-header">
+        <button class="btn-toggle-sidebar" id="btnToggleSidebar" aria-label="Toggle sidebar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <line x1="3" y1="6" x2="21" y2="6"/>
+            <line x1="3" y1="12" x2="21" y2="12"/>
+            <line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
+        </button>
+
+        <div class="header-brand">
+          <span class="header-icon" aria-hidden="true">
+            <svg viewBox="0 0 22 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="11" cy="11" r="2" fill="#1863DC"/>
+              <path d="M11 9C11 6.5 8.5 5 7 6.5C8.5 8 9 9 11 9Z" fill="#1863DC"/>
+              <path d="M13 11C15.5 11 17 8.5 15.5 7C14 8.5 13 9 13 11Z" fill="#1863DC" opacity="0.75"/>
+              <path d="M11 13C11 15.5 13.5 17 15 15.5C13.5 14 13 13 11 13Z" fill="#1863DC" opacity="0.55"/>
+              <path d="M9 11C6.5 11 5 13.5 6.5 15C8 13.5 9 13 9 11Z" fill="#1863DC" opacity="0.38"/>
+            </svg>
+          </span>
+          <span class="header-title">CVS Assistant</span>
+        </div>
+
+        <!-- Theme toggle button -->
+        <button class="btn-theme" id="btnTheme" aria-label="Switch to dark mode" title="Switch to dark mode">
+          <!-- Moon icon — shown when light mode is active -->
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"/>
+          </svg>
+          <!-- Sun icon — shown when dark mode is active -->
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="5"/>
+            <line x1="12" y1="1"  x2="12" y2="3"/>
+            <line x1="12" y1="21" x2="12" y2="23"/>
+            <line x1="4.22" y1="4.22"  x2="5.64" y2="5.64"/>
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+            <line x1="1"  y1="12" x2="3"  y2="12"/>
+            <line x1="21" y1="12" x2="23" y2="12"/>
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+          </svg>
+        </button>
+      </header>
+
+      <!-- Messages area -->
+      <div class="messages-container" id="messagesContainer" role="log" aria-live="polite" aria-label="Chat messages">
+
+        <!-- Welcome / empty state -->
+        <div class="welcome-state" id="welcomeState">
+
+          <div class="welcome-logo" aria-hidden="true">
+            <svg viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="36" cy="36" r="32" fill="#1863DC" opacity="0.08"/>
+              <circle cx="36" cy="36" r="6" fill="#1863DC"/>
+              <path d="M36 30C36 21 27 16 23 20C27 24 29 28 36 30Z" fill="#1863DC"/>
+              <path d="M42 36C51 36 56 27 52 23C48 27 46 29 42 36Z" fill="#1863DC" opacity="0.75"/>
+              <path d="M36 42C36 51 45 56 49 52C45 48 43 46 36 42Z" fill="#1863DC" opacity="0.55"/>
+              <path d="M30 36C21 36 16 45 20 49C24 45 26 43 30 36Z" fill="#1863DC" opacity="0.38"/>
+            </svg>
+          </div>
+
+          <h1 class="welcome-title">CVS Certification Assistant</h1>
+          <p class="welcome-subtitle">
+            Get information about the CERTIFIRE CF761 approval for SAFE4 fire-resistant steel ductwork, including fire ratings and certification details.
+          </p>
+
+          <div class="welcome-suggestions">
+            <button class="suggestion-chip" data-msg="What is the fire resistance rating of the CVS ductwork systems?">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 1c0 4-4 5-4 8a4 4 0 008 0c0-3-4-4-4-8z"/><path d="M6 12a2 2 0 004 0"/></svg>
+              Fire resistance ratings
+            </button>
+            <button class="suggestion-chip" data-msg="What types of steel ductwork are covered in this certification?">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1" y="5" width="14" height="6" rx="1"/><path d="M4 5V3h8v2M4 11v2h8v-2"/></svg>
+              Ductwork types covered
+            </button>
+            <button class="suggestion-chip" data-msg="When was this certification issued and when does it expire?">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="1"/><path d="M5 1v2M11 1v2M2 6h12"/></svg>
+              Certification validity dates
+            </button>
+            <button class="suggestion-chip" data-msg="What are the technical schedules and specifications in the CF761_4 certificate?">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="1"/><path d="M5 8h6M5 5h6M5 11h4"/></svg>
+              Technical schedules
+            </button>
+          </div>
+
+        </div>
+        <!-- /welcome-state -->
+
+      </div>
+      <!-- /messages-container -->
+
+      <!-- Typing indicator (lives outside messages so it stays visible at bottom) -->
+      <div class="typing-indicator" id="typingIndicator" aria-hidden="true" aria-label="Assistant is typing">
+        <div class="typing-avatar" aria-hidden="true">
+          <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="10" cy="10" r="2" fill="#1863DC"/>
+            <path d="M10 8C10 5.5 7.5 4 6 5.5C7.5 7 8 8 10 8Z" fill="#1863DC"/>
+            <path d="M12 10C14.5 10 16 7.5 14.5 6C13 7.5 12 8 12 10Z" fill="#1863DC" opacity="0.75"/>
+            <path d="M10 12C10 14.5 12.5 16 14 14.5C12.5 13 12 12 10 12Z" fill="#1863DC" opacity="0.55"/>
+            <path d="M8 10C5.5 10 4 12.5 5.5 14C7 12.5 8 12 8 10Z" fill="#1863DC" opacity="0.38"/>
+          </svg>
+        </div>
+        <div class="typing-dots">
+          <span></span><span></span><span></span>
+        </div>
+      </div>
+
+      <!-- Input area -->
+      <div class="input-area">
+        <div class="input-wrapper">
+          <textarea
+            id="messageInput"
+            class="message-input"
+            placeholder="Ask about fire ratings, ductwork specs, certification scope…"
+            rows="1"
+            maxlength="4096"
+            aria-label="Message input"
+          ></textarea>
+          <div class="input-actions">
+            <button class="btn-send" id="btnSend" aria-label="Send message" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                <line x1="22" y1="2" x2="11" y2="13"/>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <p class="input-hint">
+          <kbd>Enter</kbd> to send &middot; <kbd>Shift + Enter</kbd> for new line
+        </p>
+      </div>
+
+    </main>
+    <!-- /main-area -->
+
+  </div>
+  <!-- /app-shell -->
+
+  <!-- Toast container -->
+  <div class="toast-container" id="toastContainer" aria-live="assertive" aria-atomic="true"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
