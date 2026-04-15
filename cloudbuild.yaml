@@ -1,0 +1,40 @@
+substitutions:
+  _REGION: me-central1
+  _SERVICE: cvs-chatbot
+  _IMAGE: me-central1-docker.pkg.dev/cvs-tools/cloud-run-source-deploy/cvs-chatbot
+
+steps:
+  # Step 1: Build the Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_IMAGE}:latest'
+      - '-t'
+      - '${_IMAGE}:${SHORT_SHA}'
+      - '-f'
+      - 'docker/Dockerfile'
+      - '.'
+
+  # Step 2: Push both tags so rollbacks are easy (use the SHA tag to pin a version)
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '--all-tags', '${_IMAGE}']
+
+  # Step 3: Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE}'
+      - '--image=${_IMAGE}:${SHORT_SHA}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--quiet'
+
+images:
+  - '${_IMAGE}:latest'
+  - '${_IMAGE}:${SHORT_SHA}'
+
+options:
+  logging: CLOUD_LOGGING_ONLY

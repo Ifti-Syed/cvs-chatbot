@@ -82,7 +82,8 @@ def _get_services() -> tuple[QdrantService, OpenAIService, ChatService, Ingestio
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4096)
-    conversation_history: list[dict[str, Any]] = Field(default_factory=list)
+    # Cap history to prevent oversized payloads; oldest turns are dropped client-side anyway
+    conversation_history: list[dict[str, Any]] = Field(default_factory=list, max_length=50)
     stream: bool = Field(default=False)
 
 
@@ -163,9 +164,12 @@ async def chat(
                 message=request.message,
                 conversation_history=request.conversation_history,
             )
-        except Exception as exc:
-            logger.exception("Stream setup error: %s", exc)
+        except RuntimeError as exc:
+            logger.error("Stream retrieval error for message %.80r: %s", request.message, exc)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Stream setup error for message %.80r", request.message)
+            raise HTTPException(status_code=500, detail="Failed to start stream. Please try again.") from exc
 
         return StreamingResponse(
             generator,
@@ -182,9 +186,14 @@ async def chat(
             conversation_history=request.conversation_history,
         )
         return ChatResponse(answer=result["answer"], sources=result["sources"])
+    except RuntimeError as exc:
+        # RuntimeError is raised by _retrieve_and_rerank for known transient failures
+        # (embedding generation, vector search). Pass the safe message through.
+        logger.error("Chat retrieval error for message %.80r: %s", request.message, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Chat error: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
+        logger.exception("Unexpected chat error for message %.80r", request.message)
+        raise HTTPException(status_code=500, detail="Chat request failed. Please try again.") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +223,14 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
 
     # Read file bytes once; reuse for GCS upload and local temp file
     pdf_bytes = await file.read()
+
+    # Reject uploads that exceed the configured size limit
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    if len(pdf_bytes) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum allowed size is {settings.max_upload_size_mb} MB.",
+        )
 
     # Remove old vectors if the document was previously ingested
     try:
@@ -253,8 +270,8 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("Ingestion failed for '%s': %s", document_name, exc)
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}") from exc
+        logger.exception("Ingestion failed for '%s'", document_name)
+        raise HTTPException(status_code=500, detail="Ingestion failed. Please try again.") from exc
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -332,8 +349,8 @@ async def ingest_gcs_document(body: GCSIngestRequest) -> UploadResponse:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
-        logger.exception("GCS ingestion failed for '%s': %s", body.blob_name, exc)
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}") from exc
+        logger.exception("GCS ingestion failed for '%s'", body.blob_name)
+        raise HTTPException(status_code=500, detail="Ingestion failed. Please try again.") from exc
 
     return UploadResponse(
         status="success",
@@ -441,8 +458,8 @@ async def list_documents() -> list[DocumentInfo]:
         names = qdrant_service.get_documents()
         return [DocumentInfo(document_name=n) for n in names]
     except Exception as exc:
-        logger.exception("Error listing documents: %s", exc)
-        raise HTTPException(status_code=500, detail=f"Failed to list documents: {exc}") from exc
+        logger.exception("Error listing documents")
+        raise HTTPException(status_code=500, detail="Failed to list documents.") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -467,8 +484,8 @@ async def delete_document(document_name: str) -> DeleteResponse:
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("Error deleting document '%s': %s", document_name, exc)
-        raise HTTPException(status_code=500, detail=f"Delete failed: {exc}") from exc
+        logger.exception("Error deleting document '%s'", document_name)
+        raise HTTPException(status_code=500, detail="Delete failed. Please try again.") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -494,5 +511,5 @@ async def list_gcs_documents() -> list[dict]:
     try:
         return _gcs_service.list_pdfs()
     except Exception as exc:
-        logger.exception("Error listing GCS documents: %s", exc)
-        raise HTTPException(status_code=500, detail=f"GCS listing failed: {exc}") from exc
+        logger.exception("Error listing GCS documents")
+        raise HTTPException(status_code=500, detail="GCS listing failed. Please try again.") from exc

@@ -171,13 +171,26 @@ class ChatApp {
   // =========================================================================
 
   async _callChatStream(message, history) {
-    const res = await fetch(`${API_BASE}/api/chat`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ message, conversation_history: history, stream: true }),
-    });
+    // AbortController lets us cancel the fetch on timeout
+    const controller = new AbortController();
+    const timeoutId  = setTimeout(() => controller.abort(), 45000); // 45 s hard limit
+
+    let res;
+    try {
+      res = await fetch(`${API_BASE}/api/chat`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ message, conversation_history: history, stream: true }),
+        signal:  controller.signal,
+      });
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') throw new Error('Request timed out. Please try again.');
+      throw err;
+    }
 
     if (!res.ok) {
+      clearTimeout(timeoutId);
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Server error ${res.status}`);
     }
@@ -242,6 +255,8 @@ class ChatApp {
         }
       }
     }
+
+    clearTimeout(timeoutId);
 
     // Safety net: stream ended without a done event
     if (!done_) {
@@ -325,12 +340,13 @@ class ChatApp {
       sources.forEach((s) => {
         const chip = document.createElement('span');
         chip.className = 'source-chip';
+        const pageLabel = s.page_number != null ? ` · p.${s.page_number}` : '';
         chip.innerHTML = `
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
             <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
             <polyline points="14 2 14 8 20 8"/>
           </svg>
-          ${this._esc(s.document_name)} · p.${s.page_number}`;
+          ${this._esc(s.document_name)}${pageLabel}`;
         srcWrap.appendChild(chip);
       });
       wrap.appendChild(srcWrap);

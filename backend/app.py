@@ -130,13 +130,22 @@ def _log_startup_banner() -> None:
 
 
 def _init_qdrant() -> None:
-    """Ensure the Qdrant collection exists before the first request."""
+    """Ensure the Qdrant collection exists before the first request.
+
+    Raises SystemExit on failure so Cloud Run marks the instance as unhealthy
+    and refuses to route traffic until a healthy instance is available.
+    """
+    if not settings.openai_api_key or not settings.openai_api_key.strip():
+        logger.critical("OPENAI_API_KEY is not set. Cannot start — all chat requests would fail.")
+        raise SystemExit(1)
+
     try:
         qdrant_service, _, _, _ = _get_services()
         qdrant_service.initialize_collection()
         logger.info("Qdrant collection '%s' ready.", settings.qdrant_collection_name)
     except Exception as exc:
-        logger.error("Qdrant init failed: %s — vector ops may fail.", exc)
+        logger.critical("Qdrant init failed: %s — refusing to start.", exc)
+        raise SystemExit(1) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +170,12 @@ def create_app() -> FastAPI:
 
 
 def _add_cors(app: FastAPI) -> None:
+    # Parse comma-separated origins; strip whitespace from each entry.
+    raw = settings.allowed_origins or "*"
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=origins,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
