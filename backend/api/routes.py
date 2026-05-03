@@ -20,10 +20,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.config import settings
+from backend.ingestion.excel_processor import EXCEL_EXTENSIONS
 from backend.ingestion.pipeline import IngestionPipeline
 from backend.services.chat_service import ChatService
 from backend.services.gcs_service import GCSService
@@ -129,6 +130,36 @@ class BulkIngestResponse(BaseModel):
     message: str
 
 
+class JsonTablesIngestRequest(BaseModel):
+    subfolder: str = Field(
+        default="Cf761-Tables",
+        description="GCS subfolder under sales_pdfs/ containing the JSON files.",
+    )
+    document_name: Optional[str] = Field(
+        default=None,
+        description="Override logical document name (defaults to JSON filename stem).",
+    )
+    force: bool = Field(
+        default=False,
+        description="Re-ingest even if the document already exists in Qdrant.",
+    )
+
+
+class ImagesIngestRequest(BaseModel):
+    subfolder: str = Field(
+        default="CF761-Images",
+        description="GCS subfolder under sales_pdfs/ containing the image files.",
+    )
+    document_name: str = Field(
+        default="CF761",
+        description="Logical document name for all images in this folder.",
+    )
+    force: bool = Field(
+        default=False,
+        description="Re-ingest even if the document already exists in Qdrant.",
+    )
+
+
 class DeleteResponse(BaseModel):
     status: str
     message: str
@@ -203,30 +234,38 @@ async def chat(
 @router.post("/upload-document", response_model=UploadResponse)
 async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     """
-    Accept a PDF upload, store it in GCS (if configured), then run the
-    full ingestion pipeline to embed and index it in Qdrant.
+    Accept a PDF or Excel upload, store it in GCS (if configured), then
+    run the full ingestion pipeline to embed and index it in Qdrant.
 
+    Supported: .pdf  |  .xlsx  .xls  .xlsm  .xlsb
     Duplicate documents are re-ingested (old vectors are deleted first).
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
 
     original_name = Path(file.filename)
-    if original_name.suffix.lower() != ".pdf":
+    suffix = original_name.suffix.lower()
+
+    _PDF_EXT = {".pdf"}
+    _SUPPORTED = _PDF_EXT | EXCEL_EXTENSIONS
+
+    if suffix not in _SUPPORTED:
         raise HTTPException(
             status_code=400,
-            detail=f"Only PDF files are accepted. Got: '{original_name.suffix}'",
+            detail=(
+                f"Unsupported file type '{suffix}'. "
+                f"Accepted: {', '.join(sorted(_SUPPORTED))}"
+            ),
         )
 
+    is_pdf = suffix == ".pdf"
     document_name = original_name.stem
     qdrant_service, _, _, ingestion_pipeline = _get_services()
 
-    # Read file bytes once; reuse for GCS upload and local temp file
-    pdf_bytes = await file.read()
+    file_bytes = await file.read()
 
-    # Reject uploads that exceed the configured size limit
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    if len(pdf_bytes) > max_bytes:
+    if len(file_bytes) > max_bytes:
         raise HTTPException(
             status_code=413,
             detail=f"File too large. Maximum allowed size is {settings.max_upload_size_mb} MB.",
@@ -244,29 +283,45 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
     gcs_blob_name: Optional[str] = None
     if _gcs_service is not None:
         try:
-            gcs_blob_name = _gcs_service.upload_pdf(pdf_bytes, original_name.name)
+            content_type = (
+                "application/pdf" if is_pdf
+                else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            gcs_blob_name = _gcs_service.upload_file(
+                file_bytes, original_name.name, content_type=content_type
+            )
         except Exception as exc:
-            logger.warning("GCS upload failed for '%s': %s – continuing without GCS.", original_name.name, exc)
+            logger.warning(
+                "GCS upload failed for '%s': %s — continuing without GCS.",
+                original_name.name, exc,
+            )
 
     # Write to a temp file for the ingestion pipeline
     tmp_path = ""
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-            tmp.write(pdf_bytes)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(file_bytes)
             tmp_path = tmp.name
 
-        # Derive source_folder from GCS path if available
         source_folder = (
             f"gs://{settings.gcs_bucket_name}/{settings.gcs_folder_path}"
             if gcs_blob_name
             else "local_upload"
         )
 
-        result = await ingestion_pipeline.process_pdf(
-            file_path=tmp_path,
-            document_name=document_name,
-            source_folder=source_folder,
-        )
+        if is_pdf:
+            result = await ingestion_pipeline.process_pdf(
+                file_path=tmp_path,
+                document_name=document_name,
+                source_folder=source_folder,
+            )
+        else:
+            result = await ingestion_pipeline.process_excel(
+                file_path=tmp_path,
+                document_name=document_name,
+                source_folder=source_folder,
+            )
+
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
@@ -276,6 +331,7 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
+    file_type_label = "PDF" if is_pdf else "Excel"
     return UploadResponse(
         status="success",
         document_name=result["document_name"],
@@ -283,11 +339,55 @@ async def upload_document(file: UploadFile = File(...)) -> UploadResponse:
         pages=result["pages"],
         gcs_path=gcs_blob_name,
         message=(
-            f"'{result['document_name']}' ingested: "
-            f"{result['total_chunks']} chunks from {result['pages']} page(s)."
+            f"[{file_type_label}] '{result['document_name']}' ingested: "
+            f"{result['total_chunks']} chunks from {result['pages']} page(s)/sheet(s)."
             + (f" Stored at gs://{settings.gcs_bucket_name}/{gcs_blob_name}." if gcs_blob_name else "")
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Image proxy — serves GCS-stored page images to the browser
+# ---------------------------------------------------------------------------
+
+@router.get("/images/{document_name}/{filename}")
+async def get_image(document_name: str, filename: str):
+    """
+    Proxy endpoint that fetches a page image stored in GCS and returns it
+    to the browser.  The blob path is:
+        images/<document_name>/<filename>
+
+    This avoids needing a public GCS bucket — all image requests flow
+    through the API with the server's ADC credentials.
+    """
+    if _gcs_service is None:
+        _get_services()  # trigger lazy init
+
+    if _gcs_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Image storage (GCS) is not configured.",
+        )
+
+    blob_name = f"images/{document_name}/{filename}"
+
+    try:
+        image_bytes = _gcs_service.download_file(blob_name)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Image '{filename}' not found for document '{document_name}'.",
+        )
+    except Exception as exc:
+        logger.exception("Could not fetch image '%s'", blob_name)
+        raise HTTPException(status_code=500, detail="Failed to fetch image.") from exc
+
+    # Detect content type from extension
+    ext = Path(filename).suffix.lower().lstrip(".")
+    content_type_map = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
+    content_type = content_type_map.get(ext, "image/png")
+
+    return Response(content=image_bytes, media_type=content_type)
 
 
 # ---------------------------------------------------------------------------
@@ -386,23 +486,24 @@ async def ingest_all_gcs_documents(force: bool = False) -> BulkIngestResponse:
 
     qdrant_service, _, _, ingestion_pipeline = _get_services()
 
-    pdf_list = _gcs_service.list_pdfs()
-    if not pdf_list:
+    all_docs = _gcs_service.list_documents()
+    if not all_docs:
         return BulkIngestResponse(
             status="success",
             ingested=[],
             skipped=[],
             failed=[],
-            message="No PDFs found in GCS bucket.",
+            message="No documents found in GCS bucket.",
         )
 
     ingested: list[str] = []
     skipped: list[str] = []
     failed: list[dict[str, str]] = []
 
-    for pdf_info in pdf_list:
-        blob_name = pdf_info["blob_name"]
-        document_name = pdf_info["document_name"]
+    for doc_info in all_docs:
+        blob_name    = doc_info["blob_name"]
+        document_name = doc_info["document_name"]
+        file_type    = doc_info["file_type"]  # "pdf" or "excel"
 
         # Skip already-indexed documents unless forced
         if not force:
@@ -417,7 +518,6 @@ async def ingest_all_gcs_documents(force: bool = False) -> BulkIngestResponse:
                 )
 
         if force:
-            # Remove stale vectors before re-ingesting
             try:
                 if qdrant_service.check_document_exists(document_name):
                     qdrant_service.delete_document(document_name)
@@ -425,10 +525,16 @@ async def ingest_all_gcs_documents(force: bool = False) -> BulkIngestResponse:
                 logger.warning("Could not delete old vectors for '%s': %s", document_name, exc)
 
         try:
-            await ingestion_pipeline.process_pdf_from_gcs(
-                blob_name=blob_name,
-                document_name=document_name,
-            )
+            if file_type == "excel":
+                await ingestion_pipeline.process_excel_from_gcs(
+                    blob_name=blob_name,
+                    document_name=document_name,
+                )
+            else:
+                await ingestion_pipeline.process_pdf_from_gcs(
+                    blob_name=blob_name,
+                    document_name=document_name,
+                )
             ingested.append(document_name)
         except Exception as exc:
             logger.error("Failed to ingest '%s': %s", document_name, exc)
@@ -441,7 +547,290 @@ async def ingest_all_gcs_documents(force: bool = False) -> BulkIngestResponse:
         failed=failed,
         message=(
             f"Ingested {len(ingested)}, skipped {len(skipped)}, "
-            f"failed {len(failed)} of {len(pdf_list)} PDF(s)."
+            f"failed {len(failed)} of {len(all_docs)} document(s)."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reset collection and re-ingest everything from GCS
+# ---------------------------------------------------------------------------
+
+@router.post("/reset-and-reingest", response_model=BulkIngestResponse)
+async def reset_and_reingest() -> BulkIngestResponse:
+    """
+    DESTRUCTIVE — drops the entire Qdrant collection, recreates it fresh,
+    then re-ingests ALL data from structured JSON tables and captioned images.
+
+    PDF content is intentionally excluded — all specifications come from the
+    pre-structured JSON files for accuracy.
+
+    Use this when:
+      - JSON table files have been updated
+      - New images have been added to CF761-Images/
+      - Collection schema has changed and a full rebuild is needed
+    """
+    if _gcs_service is None:
+        _get_services()
+    if _gcs_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="GCS is not configured. Set GCS_BUCKET_NAME in your environment.",
+        )
+
+    qdrant_service, _, _, ingestion_pipeline = _get_services()
+
+    # Step 1 — wipe the collection
+    logger.info("RESET: dropping and recreating Qdrant collection.")
+    qdrant_service.reset_collection()
+    logger.info("RESET: collection is empty and ready.")
+
+    ingested: list[str] = []
+    failed:   list[dict[str, str]] = []
+
+    # Step 2 — re-ingest PDFs from Pdf files subfolder
+    _PDF_SUBFOLDER = "Pdf files"
+    try:
+        pdf_files = _gcs_service.list_pdf_files(_PDF_SUBFOLDER)
+    except Exception as exc:
+        logger.error("Could not list PDF files from GCS: %s", exc)
+        pdf_files = []
+
+    for doc_info in pdf_files:
+        doc_name  = doc_info["name_stem"]
+        blob_name = doc_info["blob_name"]
+        try:
+            result = await ingestion_pipeline.process_pdf_from_gcs(
+                blob_name=blob_name, document_name=doc_name,
+            )
+            ingested.append(doc_name)
+            logger.info("Reset re-ingested PDF '%s': %d chunks.", doc_name, result["total_chunks"])
+        except Exception as exc:
+            logger.error("PDF re-ingest failed for '%s': %s", doc_name, exc)
+            failed.append({"document_name": doc_name, "error": str(exc)})
+
+    # Step 2b — re-ingest HR Policy PDFs (root-level HR-Policy/ subfolder)
+    _HR_SUBFOLDER = "HR-Policy"
+    try:
+        hr_files = _gcs_service.list_pdfs_from_root_subfolder(_HR_SUBFOLDER)
+    except Exception as exc:
+        logger.error("Could not list HR PDF files from GCS: %s", exc)
+        hr_files = []
+
+    for doc_info in hr_files:
+        doc_name  = doc_info["name_stem"]
+        blob_name = doc_info["blob_name"]
+        try:
+            result = await ingestion_pipeline.process_pdf_from_gcs(
+                blob_name=blob_name,
+                document_name=doc_name,
+                source_type_override="hr_policy",
+            )
+            ingested.append(doc_name)
+            logger.info("Reset re-ingested HR PDF '%s': %d chunks.", doc_name, result["total_chunks"])
+        except Exception as exc:
+            logger.error("HR PDF re-ingest failed for '%s': %s", doc_name, exc)
+            failed.append({"document_name": doc_name, "error": str(exc)})
+
+    # Step 3 — re-ingest JSON tables
+    _JSON_SUBFOLDER = "Cf761-Tables"
+    try:
+        json_files = _gcs_service.list_json_files(_JSON_SUBFOLDER)
+    except Exception as exc:
+        logger.error("Could not list JSON files: %s", exc)
+        json_files = []
+
+    for file_info in json_files:
+        doc_name = file_info["name_stem"]
+        try:
+            result = await ingestion_pipeline.process_json_from_gcs(
+                blob_name=file_info["blob_name"],
+                document_name=doc_name,
+            )
+            ingested.append(doc_name)
+            logger.info("Reset re-ingested JSON '%s': %d records.", doc_name, result["total_chunks"])
+        except Exception as exc:
+            logger.error("JSON re-ingest failed for '%s': %s", doc_name, exc)
+            failed.append({"document_name": doc_name, "error": str(exc)})
+
+    # Step 4 — re-ingest images
+    _IMAGE_SUBFOLDER = "CF761-Images"
+    _IMAGE_DOC_KEY   = "CF761-images"
+    try:
+        result = await ingestion_pipeline.process_images_from_gcs(
+            subfolder=_IMAGE_SUBFOLDER,
+            document_name=_IMAGE_DOC_KEY,
+        )
+        ingested.append(_IMAGE_DOC_KEY)
+        logger.info("Reset re-ingested %d image caption(s).", result["total_chunks"])
+    except Exception as exc:
+        logger.error("Image re-ingest failed: %s", exc)
+        failed.append({"document_name": _IMAGE_DOC_KEY, "error": str(exc)})
+
+    status = "success" if not failed else "partial"
+    return BulkIngestResponse(
+        status=status,
+        ingested=ingested,
+        skipped=[],
+        failed=failed,
+        message=(
+            f"Collection reset and rebuilt. "
+            f"Ingested {len(ingested)} source(s), failed {len(failed)}."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ingest JSON table files from GCS
+# ---------------------------------------------------------------------------
+
+@router.post("/ingest-json-tables", response_model=BulkIngestResponse)
+async def ingest_json_tables(body: JsonTablesIngestRequest) -> BulkIngestResponse:
+    """
+    List every JSON file under sales_pdfs/<subfolder>/ in GCS and ingest each
+    one as a set of JSON table records into Qdrant.
+
+    Each record's 'text' field is embedded directly — no further chunking.
+    All structured fields (table_number, duct_size, system, etc.) are stored
+    in the Qdrant payload for precise filtering.
+    """
+    if _gcs_service is None:
+        _get_services()
+    if _gcs_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="GCS is not configured. Set GCS_BUCKET_NAME in your environment.",
+        )
+
+    qdrant_service, _, _, ingestion_pipeline = _get_services()
+
+    json_files = _gcs_service.list_json_files(body.subfolder)
+    if not json_files:
+        return BulkIngestResponse(
+            status="success",
+            ingested=[],
+            skipped=[],
+            failed=[],
+            message=f"No JSON files found under sales_pdfs/{body.subfolder}/.",
+        )
+
+    ingested: list[str] = []
+    skipped:  list[str] = []
+    failed:   list[dict[str, str]] = []
+
+    for file_info in json_files:
+        blob_name     = file_info["blob_name"]
+        document_name = body.document_name or file_info["name_stem"]
+
+        if not body.force:
+            try:
+                if qdrant_service.check_document_exists(document_name):
+                    logger.info("Skipping '%s' – already in Qdrant.", document_name)
+                    skipped.append(document_name)
+                    continue
+            except Exception as exc:
+                logger.warning("Existence check failed for '%s': %s", document_name, exc)
+
+        if body.force:
+            try:
+                if qdrant_service.check_document_exists(document_name):
+                    qdrant_service.delete_document(document_name)
+            except Exception as exc:
+                logger.warning("Could not delete old vectors for '%s': %s", document_name, exc)
+
+        try:
+            result = await ingestion_pipeline.process_json_from_gcs(
+                blob_name=blob_name,
+                document_name=document_name,
+            )
+            ingested.append(document_name)
+            logger.info(
+                "JSON ingested '%s': %d records.", document_name, result["total_chunks"]
+            )
+        except Exception as exc:
+            logger.error("JSON ingestion failed for '%s': %s", blob_name, exc)
+            failed.append({"document_name": document_name, "error": str(exc)})
+
+    return BulkIngestResponse(
+        status="success" if not failed else "partial",
+        ingested=ingested,
+        skipped=skipped,
+        failed=failed,
+        message=(
+            f"JSON tables: ingested {len(ingested)}, "
+            f"skipped {len(skipped)}, failed {len(failed)} "
+            f"of {len(json_files)} file(s)."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Ingest images from GCS (captions via GPT-4o Vision)
+# ---------------------------------------------------------------------------
+
+@router.post("/ingest-images", response_model=UploadResponse)
+async def ingest_images(body: ImagesIngestRequest) -> UploadResponse:
+    """
+    Download all images from sales_pdfs/<subfolder>/ in GCS, generate
+    a detailed text caption for each using GPT-4o Vision, embed the
+    captions, and upsert into Qdrant.
+
+    The original images are also copied to images/<document_name>/ in GCS
+    so the frontend /api/images proxy can display them alongside answers.
+    """
+    if _gcs_service is None:
+        _get_services()
+    if _gcs_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail="GCS is not configured. Set GCS_BUCKET_NAME in your environment.",
+        )
+
+    qdrant_service, _, _, ingestion_pipeline = _get_services()
+    doc_key = f"{body.document_name}-images"
+
+    if not body.force:
+        try:
+            if qdrant_service.check_document_exists(doc_key):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Images for '{body.document_name}' are already indexed. "
+                        "Pass force=true to re-ingest."
+                    ),
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("Existence check failed: %s", exc)
+
+    if body.force:
+        try:
+            if qdrant_service.check_document_exists(doc_key):
+                qdrant_service.delete_document(doc_key)
+        except Exception as exc:
+            logger.warning("Could not delete old image vectors: %s", exc)
+
+    try:
+        result = await ingestion_pipeline.process_images_from_gcs(
+            subfolder=body.subfolder,
+            document_name=doc_key,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Image ingestion failed for subfolder '%s'", body.subfolder)
+        raise HTTPException(status_code=500, detail="Image ingestion failed.") from exc
+
+    return UploadResponse(
+        status="success",
+        document_name=result["document_name"],
+        total_chunks=result["total_chunks"],
+        pages=result["pages"],
+        gcs_path=f"{settings.gcs_folder_path}/{body.subfolder}",
+        message=(
+            f"Captioned and indexed {result['total_chunks']} image(s) "
+            f"from '{body.subfolder}' as '{result['document_name']}'."
         ),
     )
 
@@ -509,7 +898,7 @@ async def list_gcs_documents() -> list[dict]:
         )
 
     try:
-        return _gcs_service.list_pdfs()
+        return _gcs_service.list_documents()
     except Exception as exc:
         logger.exception("Error listing GCS documents")
         raise HTTPException(status_code=500, detail="GCS listing failed. Please try again.") from exc

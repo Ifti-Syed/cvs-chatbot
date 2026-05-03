@@ -13,7 +13,70 @@
   />
 </head>
 <body>
-  <div class="app-shell" id="appShell">
+
+  <!-- ==================== LOGIN OVERLAY ===================== -->
+  <div class="login-overlay" id="loginOverlay">
+    <div class="login-card">
+
+      <div class="login-logo" aria-hidden="true">
+        <svg viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="28" cy="28" r="24" fill="#1863DC" opacity="0.10"/>
+          <circle cx="28" cy="28" r="5" fill="#1863DC"/>
+          <path d="M28 23C28 16 21 12 18 15C21 18 22 21 28 23Z" fill="#1863DC"/>
+          <path d="M33 28C40 28 44 21 41 18C38 21 36 22 33 28Z" fill="#1863DC" opacity="0.75"/>
+          <path d="M28 33C28 40 35 44 38 41C35 38 34 36 28 33Z" fill="#1863DC" opacity="0.55"/>
+          <path d="M23 28C16 28 12 35 15 38C18 35 20 34 23 28Z" fill="#1863DC" opacity="0.38"/>
+        </svg>
+      </div>
+
+      <h1 class="login-title">CVS Assistant</h1>
+      <p class="login-subtitle">Sign in to your account</p>
+
+      <form class="login-form" id="loginForm" novalidate>
+        <div class="form-group">
+          <label for="loginEmail">Email</label>
+          <input
+            type="email"
+            id="loginEmail"
+            name="email"
+            placeholder="you@company.com"
+            autocomplete="email"
+            required
+          />
+        </div>
+
+        <div class="form-group">
+          <label for="loginPassword">Password</label>
+          <div class="password-wrapper">
+            <input
+              type="password"
+              id="loginPassword"
+              name="password"
+              placeholder="••••••••"
+              autocomplete="current-password"
+              required
+            />
+            <button type="button" class="btn-toggle-pw" id="btnTogglePw" aria-label="Show password" tabindex="-1">
+              <svg class="eye-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              <svg class="eye-shut" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="login-error" id="loginError" role="alert" aria-live="polite"></div>
+
+        <button type="submit" class="btn-login" id="btnLogin">
+          <span class="btn-login-text">Sign In</span>
+          <span class="btn-login-spinner" aria-hidden="true"></span>
+        </button>
+      </form>
+
+      <p class="login-footer">Central Ventilation System &copy; 2025</p>
+    </div>
+  </div>
+  <!-- /LOGIN OVERLAY -->
+
+  <div class="app-shell" id="appShell" style="display:none">
 
     <!-- ===================== SIDEBAR ========================== -->
     <aside class="sidebar" id="sidebar">
@@ -57,13 +120,22 @@
       <!-- Spacer pushes footer to bottom -->
       <div class="sidebar-spacer"></div>
 
-      <!-- Footer — company name only, no tool branding -->
+      <!-- Footer — logged-in user + logout -->
       <div class="sidebar-footer">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-          <circle cx="12" cy="12" r="10"/>
-          <path d="M12 8v4l3 3"/>
-        </svg>
-        <span>&copy; Central Ventilation System</span>
+        <div class="user-info" id="userInfo">
+          <div class="user-avatar" id="userAvatar">?</div>
+          <div class="user-details">
+            <span class="user-name"  id="userName">Loading…</span>
+            <span class="user-dept"  id="userDept"></span>
+          </div>
+        </div>
+        <button class="btn-logout" id="btnLogout" title="Sign out" aria-label="Sign out">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
+            <polyline points="16 17 21 12 16 7"/>
+            <line x1="21" y1="12" x2="9" y2="12"/>
+          </svg>
+        </button>
       </div>
 
     </aside>
@@ -138,21 +210,13 @@
           </p>
 
           <div class="welcome-suggestions">
-            <button class="suggestion-chip" data-msg="What is the fire resistance rating of the CVS ductwork systems?">
+            <button class="suggestion-chip" data-msg="What is the annual leave entitlement for CVS employees?">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="1"/><path d="M5 1v2M11 1v2M2 6h12"/><path d="M5 10h6M5 13h3"/></svg>
+              HR leave policy
+            </button>
+            <button class="suggestion-chip" data-msg="What are the fire resistance ratings for SAFE4 ductwork systems?">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M8 1c0 4-4 5-4 8a4 4 0 008 0c0-3-4-4-4-8z"/><path d="M6 12a2 2 0 004 0"/></svg>
-              Fire resistance ratings
-            </button>
-            <button class="suggestion-chip" data-msg="What types of steel ductwork are covered in this certification?">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1" y="5" width="14" height="6" rx="1"/><path d="M4 5V3h8v2M4 11v2h8v-2"/></svg>
-              Ductwork types covered
-            </button>
-            <button class="suggestion-chip" data-msg="When was this certification issued and when does it expire?">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="1"/><path d="M5 1v2M11 1v2M2 6h12"/></svg>
-              Certification validity dates
-            </button>
-            <button class="suggestion-chip" data-msg="What are the technical schedules and specifications in the CF761_4 certificate?">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="2" y="2" width="12" height="12" rx="1"/><path d="M5 8h6M5 5h6M5 11h4"/></svg>
-              Technical schedules
+              Ductwork fire ratings
             </button>
           </div>
 

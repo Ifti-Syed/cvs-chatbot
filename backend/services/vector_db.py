@@ -21,6 +21,7 @@ from qdrant_client.models import (
     PayloadSchemaType,
     TextIndexParams,
     TokenizerType,
+    IntegerIndexParams,
 )
 
 from backend.config import Settings
@@ -63,6 +64,19 @@ class QdrantService:
     # Collection management
     # ------------------------------------------------------------------
 
+    def reset_collection(self) -> None:
+        """
+        Drop the existing collection and recreate it from scratch.
+        All vectors and payload data are permanently deleted.
+        """
+        existing = [c.name for c in self.client.get_collections().collections]
+        if self.collection_name in existing:
+            logger.info("Dropping collection '%s'.", self.collection_name)
+            self.client.delete_collection(self.collection_name)
+            logger.info("Collection '%s' dropped.", self.collection_name)
+        self.initialize_collection()
+        logger.info("Collection '%s' recreated fresh.", self.collection_name)
+
     def initialize_collection(self) -> None:
         """Create the Qdrant collection and all payload indexes."""
         existing = [c.name for c in self.client.get_collections().collections]
@@ -92,6 +106,13 @@ class QdrantService:
         # Full-text index on text_chunk (enables keyword/hybrid search)
         self._ensure_text_index(field_name="text_chunk")
 
+        # Keyword indexes for multi-source filtering and exact lookups
+        self._ensure_payload_index("source_type",  PayloadSchemaType.KEYWORD)
+        self._ensure_payload_index("table_number", PayloadSchemaType.KEYWORD)
+        self._ensure_payload_index("duct_size",    PayloadSchemaType.KEYWORD)
+        self._ensure_payload_index("figure_name",  PayloadSchemaType.KEYWORD)
+        self._ensure_integer_index("figure_number")
+
     def _ensure_payload_index(self, field_name: str, field_schema) -> None:
         try:
             self.client.create_payload_index(
@@ -120,6 +141,17 @@ class QdrantService:
             logger.info("Full-text index on '%s' ready.", field_name)
         except Exception as exc:
             logger.debug("Full-text index '%s' skipped (may already exist): %s", field_name, exc)
+
+    def _ensure_integer_index(self, field_name: str) -> None:
+        try:
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name=field_name,
+                field_schema=IntegerIndexParams(type="integer", lookup=True, range=False),
+            )
+            logger.info("Integer index on '%s' ready.", field_name)
+        except Exception as exc:
+            logger.debug("Integer index '%s' skipped: %s", field_name, exc)
 
     # ------------------------------------------------------------------
     # Upsert
@@ -153,27 +185,74 @@ class QdrantService:
     # Dense search
     # ------------------------------------------------------------------
 
-    def search(self, query_vector: list[float], top_k: int) -> list[dict]:
-        """
-        Semantic similarity search using the dense vector.
-
-        Returns chunks with keys: text_chunk, document_name, page_number,
-        chunk_index, score.
-        """
+    def search(
+        self,
+        query_vector: list[float],
+        top_k: int,
+        source_type_filter: str | None = None,
+    ) -> list[dict]:
+        """Dense vector similarity search, optionally filtered by source_type."""
+        query_filter = self._source_filter(source_type_filter)
         response = self.client.query_points(
             collection_name=self.collection_name,
             query=query_vector,
             using="dense_vector",
             limit=top_k,
             with_payload=True,
+            query_filter=query_filter,
         )
         return [self._hit_to_dict(hit) for hit in response.points]
+
+    def get_figure_by_name(self, figure_name: str) -> dict | None:
+        """Return the image_caption chunk for an exact figure name (e.g. 'Figure 3')."""
+        try:
+            records, _ = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(key="source_type", match=MatchValue(value="image_caption")),
+                        FieldCondition(key="figure_name", match=MatchValue(value=figure_name)),
+                    ]
+                ),
+                limit=1,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if records:
+                payload = records[0].payload or {}
+                return {
+                    "text_chunk":       payload.get("text_chunk", ""),
+                    "document_name":    payload.get("document_name", "unknown"),
+                    "page_number":      payload.get("page_number", 0),
+                    "chunk_index":      payload.get("chunk_index", 0),
+                    "score":            1.0,
+                    "retrieval_type":   "exact",
+                    "source_type":      "image_caption",
+                    "image_blob_names": payload.get("image_blob_names", []),
+                    "figure_name":      payload.get("figure_name", figure_name),
+                    "figure_number":    payload.get("figure_number"),
+                    "image_filename":   payload.get("image_filename", ""),
+                }
+        except Exception as exc:
+            logger.warning("get_figure_by_name('%s') failed: %s", figure_name, exc)
+        return None
+
+    @staticmethod
+    def _source_filter(source_type: str | None) -> Filter | None:
+        if not source_type:
+            return None
+        return Filter(must=[FieldCondition(key="source_type", match=MatchValue(value=source_type))])
 
     # ------------------------------------------------------------------
     # Full-text keyword search
     # ------------------------------------------------------------------
 
-    def keyword_search(self, query_text: str, top_k: int) -> list[dict]:
+    def keyword_search(
+        self,
+        query_text: str,
+        top_k: int,
+        source_type_filter: str | None = None,
+    ) -> list[dict]:
         """
         Full-text keyword search using Qdrant's text index on text_chunk.
 
@@ -189,16 +268,17 @@ class QdrantService:
             if not keywords:
                 return []
 
+            must_conditions = [
+                FieldCondition(key="text_chunk", match=MatchText(text=keywords)),
+            ]
+            if source_type_filter:
+                must_conditions.append(
+                    FieldCondition(key="source_type", match=MatchValue(value=source_type_filter))
+                )
+
             records, _ = self.client.scroll(
                 collection_name=self.collection_name,
-                scroll_filter=Filter(
-                    must=[
-                        FieldCondition(
-                            key="text_chunk",
-                            match=MatchText(text=keywords),
-                        )
-                    ]
-                ),
+                scroll_filter=Filter(must=must_conditions),
                 limit=top_k,
                 with_payload=True,
                 with_vectors=False,
@@ -208,12 +288,15 @@ class QdrantService:
             for record in records:
                 payload = record.payload or {}
                 chunks.append({
-                    "text_chunk": payload.get("text_chunk", ""),
-                    "document_name": payload.get("document_name", "unknown"),
-                    "page_number": payload.get("page_number", 0),
-                    "chunk_index": payload.get("chunk_index", 0),
-                    "score": 0.5,  # Neutral placeholder; RRF handles ranking
-                    "retrieval_type": "keyword",
+                    "text_chunk":       payload.get("text_chunk", ""),
+                    "document_name":    payload.get("document_name", "unknown"),
+                    "page_number":      payload.get("page_number", 0),
+                    "chunk_index":      payload.get("chunk_index", 0),
+                    "score":            0.5,  # Neutral placeholder; RRF handles ranking
+                    "retrieval_type":   "keyword",
+                    "image_blob_names": payload.get("image_blob_names", []),
+                    "sheet_name":       payload.get("sheet_name"),
+                    "file_type":        payload.get("file_type", "pdf"),
                 })
 
             # Sort deterministically so the same query always produces the same
@@ -240,6 +323,7 @@ class QdrantService:
         query_vector: list[float],
         query_text: str,
         top_k: int,
+        source_type_filter: str | None = None,
     ) -> list[dict]:
         """
         Hybrid retrieval using dense vector search + full-text keyword search,
@@ -271,12 +355,12 @@ class QdrantService:
         candidate_k = max(top_k * 2, 20)
 
         # ── Step A: dense (semantic) search ──────────────────────────────────
-        dense_chunks = self.search(query_vector, top_k=candidate_k)
+        dense_chunks = self.search(query_vector, top_k=candidate_k, source_type_filter=source_type_filter)
         for c in dense_chunks:
             c["retrieval_type"] = "dense"
 
         # ── Step B: full-text keyword search ─────────────────────────────────
-        keyword_chunks = self.keyword_search(query_text, top_k=candidate_k)
+        keyword_chunks = self.keyword_search(query_text, top_k=candidate_k, source_type_filter=source_type_filter)
 
         # ── Step C: RRF fusion ────────────────────────────────────────────────
         merged = self._rrf_merge(dense_chunks, keyword_chunks)
@@ -399,9 +483,20 @@ class QdrantService:
     def _hit_to_dict(hit) -> dict:
         payload = hit.payload or {}
         return {
-            "text_chunk": payload.get("text_chunk", ""),
-            "document_name": payload.get("document_name", "unknown"),
-            "page_number": payload.get("page_number", 0),
-            "chunk_index": payload.get("chunk_index", 0),
-            "score": round(float(hit.score), 4),
+            "text_chunk":       payload.get("text_chunk", ""),
+            "document_name":    payload.get("document_name", "unknown"),
+            "page_number":      payload.get("page_number", 0),
+            "chunk_index":      payload.get("chunk_index", 0),
+            "score":            round(float(hit.score), 4),
+            "source_type":      payload.get("source_type", ""),
+            # JSON table fields
+            "table_number":     payload.get("table_number", ""),
+            "duct_size":        payload.get("duct_size", ""),
+            "system":           payload.get("system", ""),
+            "insulation":       payload.get("insulation", ""),
+            # Image fields
+            "image_blob_names": payload.get("image_blob_names", []),
+            "figure_name":      payload.get("figure_name", ""),
+            "figure_number":    payload.get("figure_number"),
+            "image_filename":   payload.get("image_filename", ""),
         }

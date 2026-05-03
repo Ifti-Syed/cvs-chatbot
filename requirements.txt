@@ -1,14 +1,43 @@
+# ── Web framework ─────────────────────────────────────────────────────────────
 fastapi>=0.115.0,<1.0.0
 uvicorn[standard]>=0.30.0,<1.0.0
+python-multipart>=0.0.12,<1.0.0
+
+# ── Data validation & settings ────────────────────────────────────────────────
 pydantic>=2.10.0,<3.0.0
 pydantic-settings>=2.7.0,<3.0.0
+
+# ── AI / LLM ──────────────────────────────────────────────────────────────────
 openai>=1.51.0,<2.0.0
+
+# ── Vector database ───────────────────────────────────────────────────────────
 qdrant-client>=1.11.0,<2.0.0
-pypdf>=4.3.0,<6.0.0
-python-multipart>=0.0.12,<1.0.0
+
+# ── PDF processing ────────────────────────────────────────────────────────────
+# pdfplumber: layout-aware text extraction + structured table detection
+pdfplumber>=0.11.0,<1.0.0
+# pymupdf: render PDF pages to images (used for image extraction)
+# Install name is "pymupdf"; import name is "fitz"
+pymupdf>=1.24.0,<2.0.0
+
+# ── Excel processing ──────────────────────────────────────────────────────────
+pandas>=2.0.0,<3.0.0
+openpyxl>=3.1.0,<4.0.0   # engine for .xlsx files
+
+# ── Async I/O ─────────────────────────────────────────────────────────────────
 aiofiles>=24.1.0,<25.0.0
 httpx>=0.27.0,<1.0.0
+
+# ── Google Cloud ──────────────────────────────────────────────────────────────
 google-cloud-storage>=2.18.0,<3.0.0
 google-auth>=2.35.0,<3.0.0
+
+# ── Auth & database (Phase 2 — RBAC) ─────────────────────────────────────────
+python-jose[cryptography]>=3.3.0,<4.0.0
+bcrypt>=4.0.0,<5.0.0
+sqlalchemy[asyncio]>=2.0.0,<3.0.0
+aiosqlite>=0.20.0,<1.0.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.1,<2.0.0
 portalocker>=2.0.0,<3.0.0

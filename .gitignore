@@ -1,7 +1,9 @@
+#gitignore
 # Secrets — never commit
 .env
 .env.*
 !.env.example
+cloudrun.env.yaml
 
 # Virtual environment
 .venv/
@@ -24,6 +26,10 @@ htmlcov/
 
 # Local Qdrant storage
 qdrant_data/
+
+# SQLite databases (local dev only — never commit)
+*.db
+*.sqlite3
 
 # IDE
 .idea/

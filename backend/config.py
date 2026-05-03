@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # Qdrant Vector Database Settings
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: Optional[str] = None
-    qdrant_collection_name: str = "cvs_documents"
+    qdrant_collection_name: str = "cvs_collection"
 
     # Google Cloud Storage
     gcs_bucket_name: Optional[str] = None
@@ -110,6 +110,23 @@ class Settings(BaseSettings):
 
     # Maximum PDF upload size in megabytes.
     max_upload_size_mb: int = 50
+
+    # ── Auth / JWT Settings ──────────────────────────────────────────────────
+    # CHANGE this in production — use a long random string (32+ chars).
+    jwt_secret_key: str = "change-this-secret-key-in-production-min-32-chars"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 30
+    refresh_token_expire_days: int = 7
+
+    # ── Database Settings ────────────────────────────────────────────────────
+    # Local SQLite (default). Swap to PostgreSQL later:
+    #   postgresql+asyncpg://user:password@localhost:5432/cvs_chatbot
+    database_url: str = "sqlite+aiosqlite:///./chatbot.db"
+
+    # Default admin credentials created on first startup (change immediately).
+    default_admin_email: str = "admin@cvs.com"
+    default_admin_password: str = "Admin@123"
+    default_admin_name: str = "System Admin"
 
     # Application Settings
     environment: str = "development"

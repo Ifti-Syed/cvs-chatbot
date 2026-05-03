@@ -9,38 +9,192 @@ const MAX_SESSIONS     = 25;
 const STORAGE_KEY      = 'cvs_sessions';
 const SESSION_KEY      = 'cvs_session_id';
 const THEME_KEY        = 'cvs_theme';
+const AUTH_KEY         = 'cvs_auth';   // { access_token, refresh_token, user }
+
+// ---------------------------------------------------------------------------
+// AuthManager — handles login, logout, token storage, auto-refresh
+// ---------------------------------------------------------------------------
+const Auth = {
+  _data: null,
+
+  load() {
+    try {
+      const raw = localStorage.getItem(AUTH_KEY);
+      this._data = raw ? JSON.parse(raw) : null;
+    } catch { this._data = null; }
+    return this._data;
+  },
+
+  save(tokens, user) {
+    this._data = { ...tokens, user };
+    localStorage.setItem(AUTH_KEY, JSON.stringify(this._data));
+  },
+
+  clear() {
+    this._data = null;
+    localStorage.removeItem(AUTH_KEY);
+  },
+
+  get token()        { return this._data?.access_token  || null; },
+  get refreshToken() { return this._data?.refresh_token || null; },
+  get user()         { return this._data?.user          || null; },
+  get isLoggedIn()   { return !!this.token; },
+
+  headers() {
+    return this.token
+      ? { 'Content-Type': 'application/json', 'Authorization': `Bearer ${this.token}` }
+      : { 'Content-Type': 'application/json' };
+  },
+
+  async tryRefresh() {
+    if (!this.refreshToken) return false;
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ refresh_token: this.refreshToken }),
+      });
+      if (!res.ok) return false;
+      const tokens = await res.json();
+      // Keep existing user object; update tokens
+      this.save(tokens, this.user);
+      return true;
+    } catch { return false; }
+  },
+
+  async fetchMe() {
+    const res = await fetch(`${API_BASE}/api/auth/me`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+};
 
 // ---------------------------------------------------------------------------
 // ChatApp
 // ---------------------------------------------------------------------------
 class ChatApp {
   constructor() {
-    this.messages       = [];
-    this.isLoading      = false;
-    this.currentSession = null;
-    this.sessions       = {};
-    this.sidebarOpen    = window.innerWidth > 768;
-    this.theme          = localStorage.getItem(THEME_KEY) || 'light';
-    this.dom            = {};
-    this._activeMenu    = null; // currently open { id, el } context menu
+    this.messages          = [];
+    this.isLoading         = false;
+    this.currentSession    = null;
+    this.sessions          = {};
+    this.sidebarOpen       = window.innerWidth > 768;
+    this.theme             = localStorage.getItem(THEME_KEY) || 'light';
+    this.dom               = {};
+    this._activeMenu       = null; // currently open { id, el } context menu
+    this._activeController = null; // AbortController for the in-flight stream request
   }
 
   // =========================================================================
   // Boot
   // =========================================================================
 
-  init() {
+  async init() {
     this._cacheDOM();
     this._applyTheme();
+    this._initLightbox();
+    // Auth disabled — go straight to the chat UI
+    this._showApp({ full_name: 'Guest', email: '', department: '', role: '' });
+  }
+
+  // ── Auth helpers ──────────────────────────────────────────────────────────
+
+  _showLogin() {
+    document.getElementById('loginOverlay').style.display = 'flex';
+    document.getElementById('appShell').style.display     = 'none';
+    // Apply theme to login page too
+    this._applyTheme();
+  }
+
+  _showApp(user) {
+    document.getElementById('loginOverlay').style.display = 'none';
+    document.getElementById('appShell').style.display     = '';
+    this._updateUserBar(user);
     this._bindEvents();
     this._loadStorage();
     this._renderHistory();
-
     if (this.currentSession && this.sessions[this.currentSession]) {
       this._restoreSession(this.currentSession);
     } else {
       this._newSession();
     }
+  }
+
+  _updateUserBar(user) {
+    const nameEl  = document.getElementById('userName');
+    const deptEl  = document.getElementById('userDept');
+    const avatarEl = document.getElementById('userAvatar');
+    if (!user) return;
+    const first = (user.full_name || user.email || '?').charAt(0).toUpperCase();
+    if (avatarEl) avatarEl.textContent = first;
+    if (nameEl)   nameEl.textContent   = user.full_name || user.email;
+    if (deptEl)   deptEl.textContent   = user.department ? `${user.department} · ${user.role}` : user.role;
+  }
+
+  _bindLoginEvents() {
+    const form       = document.getElementById('loginForm');
+    const btnLogin   = document.getElementById('btnLogin');
+    const errorEl    = document.getElementById('loginError');
+    const emailEl    = document.getElementById('loginEmail');
+    const pwEl       = document.getElementById('loginPassword');
+    const togglePwEl = document.getElementById('btnTogglePw');
+
+    // Password visibility toggle
+    if (togglePwEl) {
+      togglePwEl.addEventListener('click', () => {
+        const isHidden = pwEl.type === 'password';
+        pwEl.type = isHidden ? 'text' : 'password';
+        togglePwEl.querySelector('.eye-open').style.display = isHidden ? 'none' : '';
+        togglePwEl.querySelector('.eye-shut').style.display = isHidden ? '' : 'none';
+        togglePwEl.setAttribute('aria-label', isHidden ? 'Hide password' : 'Show password');
+      });
+    }
+
+    const setError = (msg) => {
+      errorEl.textContent = msg;
+      errorEl.classList.toggle('visible', !!msg);
+    };
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      setError('');
+      const email    = emailEl.value.trim();
+      const password = pwEl.value;
+      if (!email || !password) { setError('Please enter your email and password.'); return; }
+
+      btnLogin.disabled = true;
+      btnLogin.classList.add('loading');
+
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/login`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({ email, password }),
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          setError(data.detail || 'Login failed. Check your credentials.');
+          return;
+        }
+
+        // Fetch user profile
+        Auth.save(data, null);
+        const me = await Auth.fetchMe();
+        Auth.save(data, me);
+
+        this._showApp(me);
+
+      } catch (err) {
+        setError('Could not reach the server. Please try again.');
+      } finally {
+        btnLogin.disabled = false;
+        btnLogin.classList.remove('loading');
+      }
+    });
   }
 
   _cacheDOM() {
@@ -68,6 +222,10 @@ class ChatApp {
     dom.btnTheme.addEventListener('click',   () => this._toggleTheme());
     dom.btnNewChat.addEventListener('click', () => this._newSession());
     dom.btnToggle.addEventListener('click',  () => this._toggleSidebar());
+
+    // Logout button hidden (auth disabled)
+    const btnLogout = document.getElementById('btnLogout');
+    if (btnLogout) btnLogout.style.display = 'none';
 
     dom.messageInput.addEventListener('input',   () => this._onInputChange());
     dom.messageInput.addEventListener('keydown', (e) => this._onKeyDown(e));
@@ -103,7 +261,17 @@ class ChatApp {
   // Sessions
   // =========================================================================
 
+  _abortActiveRequest() {
+    if (this._activeController) {
+      this._activeController.abort();
+      this._activeController = null;
+      // _showTyping(false) will be called by send()'s finally block once the
+      // abort propagates — no need to call it here.
+    }
+  }
+
   _newSession() {
+    this._abortActiveRequest();
     this.currentSession = `s_${Date.now()}`;
     this.messages = [];
     this._clearMessages();
@@ -114,6 +282,7 @@ class ChatApp {
   }
 
   _switchSession(id) {
+    this._abortActiveRequest();
     this.currentSession = id;
     this.messages = this.sessions[id]?.messages || [];
     localStorage.setItem(SESSION_KEY, id);
@@ -140,6 +309,11 @@ class ChatApp {
     const text = this.dom.messageInput.value.trim();
     if (!text || this.isLoading) return;
 
+    // Capture history BEFORE adding the current message so the backend
+    // receives only prior turns. The backend appends the current message
+    // itself — sending it in history too would cause a duplicate.
+    const history = this._buildHistory();
+
     this.dom.messageInput.value = '';
     this._onInputChange();
     this._showWelcome(false);
@@ -149,11 +323,16 @@ class ChatApp {
     this._showTyping(true);
 
     try {
-      await this._callChatStream(text, this._buildHistory());
+      await this._callChatStream(text, history);
     } catch (err) {
+      // AbortError means the user started a new chat — don't show an error.
+      if (err.name !== 'AbortError') {
+        this._addMsg('assistant', null, [], err.message || 'Something went wrong.');
+        this._toast('Could not reach the server. Please try again.', 'error');
+      }
+    } finally {
+      // Always unlock the input once the response stream is fully complete.
       this._showTyping(false);
-      this._addMsg('assistant', null, [], err.message || 'Something went wrong.');
-      this._toast('Could not reach the server. Please try again.', 'error');
     }
 
     this.scrollToBottom();
@@ -171,8 +350,28 @@ class ChatApp {
   // =========================================================================
 
   async _callChatStream(message, history) {
-    // AbortController lets us cancel the fetch on timeout
+    // Transient network errors (ERR_NAME_NOT_RESOLVED, ERR_QUIC_PROTOCOL_ERROR)
+    // are retried once after a short pause before surfacing the error to the user.
+    const MAX_ATTEMPTS = 2;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this._attemptChatStream(message, history);
+      } catch (err) {
+        const isTransient = err.name === 'TypeError' || err.message?.includes('timed out');
+        if (attempt < MAX_ATTEMPTS && isTransient) {
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  async _attemptChatStream(message, history) {
+    // AbortController lets us cancel the fetch on timeout or when the user
+    // starts a new chat / switches sessions.
     const controller = new AbortController();
+    this._activeController = controller;
     const timeoutId  = setTimeout(() => controller.abort(), 45000); // 45 s hard limit
 
     let res;
@@ -185,7 +384,8 @@ class ChatApp {
       });
     } catch (err) {
       clearTimeout(timeoutId);
-      if (err.name === 'AbortError') throw new Error('Request timed out. Please try again.');
+      this._activeController = null;
+      if (err.name === 'AbortError') return; // silently discard — user navigated away
       throw err;
     }
 
@@ -203,7 +403,9 @@ class ChatApp {
     let   buffer   = '';   // accumulates raw bytes until a complete SSE event arrives
     let   done_    = false;
 
-    this._showTyping(false);
+    // Hide the spinner — streaming has started.  isLoading stays true until
+    // the full response is done (controlled by the finally block in send()).
+    this._hideTypingIndicator();
 
     while (true) {
       const { done, value } = await reader.read();
@@ -257,6 +459,7 @@ class ChatApp {
     }
 
     clearTimeout(timeoutId);
+    this._activeController = null;
 
     // Safety net: stream ended without a done event
     if (!done_) {
@@ -333,23 +536,88 @@ class ChatApp {
       wrap.appendChild(bubble);
     }
 
-    // Source chips
+    // Show inline diagram images only when source_type === 'image_caption'
+    // (user asked for a specific figure). PDF text and table answers never
+    // render images — the citation at the end of the answer is sufficient.
     if (sources?.length) {
-      const srcWrap = document.createElement('div');
-      srcWrap.className = 'message-sources';
-      sources.forEach((s) => {
-        const chip = document.createElement('span');
-        chip.className = 'source-chip';
-        const pageLabel = s.page_number != null ? ` · p.${s.page_number}` : '';
-        chip.innerHTML = `
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
-            <polyline points="14 2 14 8 20 8"/>
-          </svg>
-          ${this._esc(s.document_name)}${pageLabel}`;
-        srcWrap.appendChild(chip);
-      });
-      wrap.appendChild(srcWrap);
+      const imageSources = sources.filter(
+        (s) => s.source_type === 'image_caption' && s.image_blob_names?.length,
+      );
+      if (imageSources.length) {
+        const srcWrap = document.createElement('div');
+        srcWrap.className = 'message-sources';
+
+        imageSources.forEach((s) => {
+          s.image_blob_names.forEach((blobName) => {
+            const parts   = blobName.split('/');
+            const docPart = parts[1] || s.document_name;
+            const filePart = parts[parts.length - 1];
+            const imgUrl  = `/api/images/${encodeURIComponent(docPart)}/${encodeURIComponent(filePart)}`;
+            const label   = s.figure_name || s.document_name;
+
+            const imgWrap = document.createElement('div');
+            imgWrap.className = 'source-image-wrap';
+
+            const badge = document.createElement('span');
+            badge.className = 'figure-badge';
+            badge.innerHTML = `
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                <rect x="1" y="2" width="14" height="11" rx="1.5"/>
+                <path d="M1 10l4-4 3 3 2-2 5 4"/>
+              </svg>
+              ${this._esc(label)}`;
+
+            const img = document.createElement('img');
+            img.src       = imgUrl;
+            img.className = 'source-image';
+            img.loading   = 'lazy';
+            img.alt       = label;
+            img.title     = 'Click to expand';
+            img.addEventListener('click', () => this._openLightbox(imgUrl, label));
+
+            imgWrap.appendChild(badge);
+            imgWrap.appendChild(img);
+            srcWrap.appendChild(imgWrap);
+          });
+        });
+
+        wrap.appendChild(srcWrap);
+      }
+    }
+
+    // Edit + Copy buttons — user messages
+    if (role === 'user' && content) {
+      const actions = document.createElement('div');
+      actions.className = 'message-actions user-actions';
+
+      const btnCopy = document.createElement('button');
+      btnCopy.className = 'btn-msg-action';
+      btnCopy.title = 'Copy message';
+      btnCopy.setAttribute('aria-label', 'Copy message');
+      btnCopy.innerHTML = `
+        <svg class="icon-copy" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+          <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+        </svg>
+        <svg class="icon-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>`;
+      btnCopy.addEventListener('click', () => this._copyResponse(btnCopy, content));
+
+      const btnEdit = document.createElement('button');
+      btnEdit.className = 'btn-msg-action';
+      btnEdit.title = 'Edit message';
+      btnEdit.setAttribute('aria-label', 'Edit message');
+      btnEdit.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
+          <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+        </svg>`;
+      btnEdit.addEventListener('click', () => this._editUserMsg(row, content));
+
+      actions.appendChild(btnCopy);
+      actions.appendChild(btnEdit);
+      wrap.appendChild(actions);
     }
 
     // Copy button — assistant responses only
@@ -391,6 +659,80 @@ class ChatApp {
         setTimeout(() => btn.classList.remove('copied'), 2000);
       })
       .catch(() => this._toast('Could not copy to clipboard', 'error'));
+  }
+
+  _editUserMsg(row, content) {
+    if (row.classList.contains('editing')) return;
+    row.classList.add('editing');
+
+    const wrap   = row.querySelector('.message-content-wrapper');
+    const bubble = row.querySelector('.message-bubble');
+
+    // Swap bubble for a resizable textarea
+    const ta = document.createElement('textarea');
+    ta.className = 'edit-msg-textarea';
+    ta.value = content;
+    bubble.replaceWith(ta);
+
+    // Auto-height
+    const resize = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 300) + 'px'; };
+    resize();
+    ta.addEventListener('input', resize);
+
+    // Send / Cancel buttons
+    const btnRow = document.createElement('div');
+    btnRow.className = 'edit-msg-buttons';
+
+    const btnCancel = document.createElement('button');
+    btnCancel.className = 'btn-edit-cancel';
+    btnCancel.textContent = 'Cancel';
+    btnCancel.addEventListener('click', () => {
+      ta.replaceWith(bubble);
+      btnRow.remove();
+      row.classList.remove('editing');
+    });
+
+    const btnSend = document.createElement('button');
+    btnSend.className = 'btn-edit-send';
+    btnSend.textContent = 'Send';
+    btnSend.addEventListener('click', () => {
+      const newText = ta.value.trim();
+      if (newText && !this.isLoading) this._submitEditedMsg(row, newText);
+    });
+
+    // Enter sends, Escape cancels
+    ta.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        const newText = ta.value.trim();
+        if (newText && !this.isLoading) this._submitEditedMsg(row, newText);
+      }
+      if (e.key === 'Escape') btnCancel.click();
+    });
+
+    btnRow.appendChild(btnCancel);
+    btnRow.appendChild(btnSend);
+    wrap.appendChild(btnRow);
+
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  }
+
+  _submitEditedMsg(row, newText) {
+    const allRows  = Array.from(this.dom.messagesContainer.querySelectorAll('.message-row'));
+    const rowIndex = allRows.indexOf(row);
+
+    // Remove this row and everything that came after it
+    allRows.slice(rowIndex).forEach((r) => r.remove());
+
+    // Trim messages array to match
+    this.messages.splice(rowIndex);
+
+    // Feed the edited text into the normal send flow
+    this.dom.messageInput.value = newText;
+    this._onInputChange();
+    this._showWelcome(false);
+    this.send();
   }
 
   _clearMessages() {
@@ -621,6 +963,7 @@ class ChatApp {
   _showTyping(show) {
     this.isLoading = show;
     this.dom.btnSend.disabled = show || this.dom.messageInput.value.trim().length === 0;
+    this.dom.messageInput.disabled = show; // block input until response is complete
 
     const ti = this.dom.typingIndicator;
     ti.setAttribute('aria-hidden', show ? 'false' : 'true');
@@ -631,7 +974,18 @@ class ChatApp {
     } else {
       const main = document.querySelector('.main-area');
       if (main) main.insertBefore(ti, this.dom.messagesContainer.nextSibling);
+      this.dom.messageInput.focus();
     }
+  }
+
+  // Hide the animated dots without touching isLoading — used when the first
+  // streamed token arrives (spinner no longer needed, but input stays locked
+  // until the full response is done).
+  _hideTypingIndicator() {
+    const ti = this.dom.typingIndicator;
+    ti.setAttribute('aria-hidden', 'true');
+    const main = document.querySelector('.main-area');
+    if (main) main.insertBefore(ti, this.dom.messagesContainer.nextSibling);
   }
 
   // =========================================================================
@@ -792,6 +1146,55 @@ class ChatApp {
 
   _time(d) {
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  // =========================================================================
+  // Lightbox — full-screen elastic image viewer
+  // =========================================================================
+
+  _initLightbox() {
+    const overlay = document.createElement('div');
+    overlay.id = 'lightbox';
+    overlay.className = 'lightbox';
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-label', 'Image viewer');
+    overlay.innerHTML = `
+      <div class="lightbox-backdrop"></div>
+      <div class="lightbox-content">
+        <button class="lightbox-close" aria-label="Close image viewer">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+        <img class="lightbox-img" src="" alt="" />
+        <div class="lightbox-caption"></div>
+      </div>`;
+
+    document.body.appendChild(overlay);
+
+    overlay.querySelector('.lightbox-backdrop').addEventListener('click', () => this._closeLightbox());
+    overlay.querySelector('.lightbox-close').addEventListener('click', () => this._closeLightbox());
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overlay.classList.contains('open')) this._closeLightbox();
+    });
+
+    this._lightbox = overlay;
+  }
+
+  _openLightbox(imgUrl, caption) {
+    if (!this._lightbox) return;
+    this._lightbox.querySelector('.lightbox-img').src = imgUrl;
+    this._lightbox.querySelector('.lightbox-img').alt = caption;
+    this._lightbox.querySelector('.lightbox-caption').textContent = caption;
+    this._lightbox.classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+
+  _closeLightbox() {
+    if (!this._lightbox) return;
+    this._lightbox.classList.remove('open');
+    document.body.style.overflow = '';
   }
 }
 

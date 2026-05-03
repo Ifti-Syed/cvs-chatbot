@@ -1,6 +1,9 @@
+#.dockerignore
 # Secrets — never bake into image
+
 .env
 .env.*
+cloudrun.env.yaml
 
 # Virtual environment — image installs fresh via pip
 .venv/

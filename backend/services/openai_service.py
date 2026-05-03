@@ -4,9 +4,11 @@ Handles embedding generation, chat completions, and LLM-based relevance selectio
 """
 
 import asyncio
+import base64
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from openai import AsyncOpenAI, OpenAI
@@ -71,6 +73,20 @@ def _keyword_match_score(query: str, text: str) -> float:
     numeric_bonus = 0.25 if _NUMERIC_UNIT_RE.search(text) else 0.0
 
     return min(base_score + numeric_bonus, 1.0)
+
+
+def _chunk_source_label(chunk: dict) -> str:
+    """Short human-readable source label for use in the reranker prompt."""
+    source_type = chunk.get("source_type", "")
+    doc = chunk.get("document_name", "Unknown")
+    if source_type == "json_table":
+        table = chunk.get("table_number", "")
+        return f"spec table {table}" if table else "spec table"
+    elif source_type == "image_caption":
+        return "image caption"
+    else:
+        page = chunk.get("page_number")
+        return f"CF761 compliance text p{page}" if page else "CF761 compliance text"
 
 
 def _score_sorted_fallback(chunks: list[dict], top_k: int, query: str = "") -> list[dict]:
@@ -141,6 +157,64 @@ class OpenAIService:
             all_embeddings.extend([item.embedding for item in sorted_data])
             logger.debug("Generated embeddings for batch %d-%d", i, i + len(batch) - 1)
         return all_embeddings
+
+    async def describe_image(self, image_bytes: bytes, filename: str) -> str:
+        """Generate a text description of an image using GPT-4o Vision.
+
+        The returned caption is used as the embedding text for the image's
+        Qdrant point, enabling semantic search over visual content.
+        Falls back to a filename-derived stub on API failure.
+        """
+        ext = Path(filename).suffix.lower()
+        mime = "image/jpeg" if ext in (".jpg", ".jpeg") else f"image/{ext.lstrip('.')}"
+        b64 = base64.standard_b64encode(image_bytes).decode()
+
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a technical analyst reviewing a fire-rated ductwork "
+                    "installation manual (CF761 SAFE4 system by Firesafe). "
+                    "Describe this figure in detail. Include: figure type "
+                    "(diagram, cross-section, detail drawing, photograph, etc.), "
+                    "all visible component labels and model references, any "
+                    "dimensions or measurements shown, duct shape (circular, "
+                    "rectangular, oval), and any installation or assembly notes. "
+                    "Include all visible text exactly as it appears. "
+                    "Write 3–5 sentences."
+                ),
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime};base64,{b64}",
+                            "detail": "high",
+                        },
+                    },
+                    {"type": "text", "text": f"Filename: {filename}"},
+                ],
+            },
+        ]
+
+        try:
+            resp = await self._async_client.chat.completions.create(
+                model="gpt-4o",
+                messages=messages,
+                max_tokens=400,
+                temperature=0.0,
+            )
+            caption = (resp.choices[0].message.content or "").strip()
+            logger.info("Described image '%s': %d chars.", filename, len(caption))
+            return caption
+        except Exception as exc:
+            logger.warning(
+                "Image description failed for '%s': %s — using fallback.", filename, exc
+            )
+            stem = Path(filename).stem.replace("-", " ").replace("_", " ")
+            return f"CF761 installation figure: {stem}."
 
     def generate_embedding_sync(self, text: str) -> list[float]:
         return asyncio.get_event_loop().run_until_complete(self.generate_embedding(text))
@@ -221,20 +295,36 @@ class OpenAIService:
             return chunks
 
         chunk_previews = "\n\n".join(
-            f"[{i + 1}] {c['text_chunk'][:500].strip()}"
+            f"[{i + 1}] ({_chunk_source_label(c)})\n{c['text_chunk'][:500].strip()}"
             for i, c in enumerate(chunks)
         )
 
         rerank_prompt = (
-            f"You are a relevance judge for document retrieval.\n\n"
+            f"You are a relevance judge for a fire-rated ductwork specification system.\n\n"
             f"User question: {query}\n\n"
-            f"Below are {len(chunks)} document excerpts (numbered):\n\n"
+            f"Document types in the corpus:\n"
+            f"  'CF761 compliance text' — The CF761 fire test certificate / test report. "
+            f"Contains test requirements, compliance criteria, maintenance thresholds, "
+            f"and fire resistance requirements (e.g. cross-section %, pass/fail criteria).\n"
+            f"  'spec table' — Manufacturer product specification tables with exact duct "
+            f"dimensions, gauges, joint types, hanger sizes, bearer spacings, and fastenings.\n"
+            f"  'image caption' — Descriptions of installation diagram figures.\n\n"
+            f"Below are {len(chunks)} excerpts (numbered, with source type shown in parentheses):\n\n"
             f"{chunk_previews}\n\n"
-            f"Task: Return the numbers of the {top_k} most relevant excerpts, "
-            f"ordered from most to least relevant. "
-            f"Prioritise excerpts that directly answer the question with specific "
-            f"facts, values, numbers, or explanations.\n"
-            f"Return ONLY a JSON array of integers, e.g. [3, 1, 7]. No explanation."
+            f"Task: Select the {top_k} most relevant excerpts for answering the question.\n\n"
+            f"Ranking rules (apply in order):\n"
+            f"1. For questions about fire test requirements, compliance values, maintenance "
+            f"   percentages, test criteria, or certificate specifications: "
+            f"   STRONGLY PREFER 'CF761 compliance text' chunks — these contain the authoritative "
+            f"   test requirements.\n"
+            f"2. For questions about duct dimensions, gauge, joint type, hanger size, bearer "
+            f"   spacing, or fastening method: prefer 'spec table' chunks.\n"
+            f"3. ALWAYS include at least one 'CF761 compliance text' chunk in your selection "
+            f"   if any such chunk is relevant to the question — even if spec tables also match.\n"
+            f"4. Choose excerpts that most directly answer with specific facts, values, or "
+            f"   explanations.\n\n"
+            f"Return ONLY a JSON array of {top_k} integers (1-based indices), "
+            f"e.g. [3, 1, 7]. No explanation."
         )
 
         messages = [

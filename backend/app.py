@@ -26,6 +26,9 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+# Suppress noisy low-level HTTP transport logs from third-party libraries
+for _noisy in ("httpcore", "httpx", "urllib3", "google.auth", "google.cloud"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -61,53 +64,109 @@ async def lifespan(app: FastAPI):
 
 
 async def _gcs_poll_loop() -> None:
-    """Background task: ingest new GCS PDFs on startup, then re-check every interval."""
-    # Small delay so the server is fully ready before the first ingest
-    await asyncio.sleep(2)
+    """Background task: ingest new documents from GCS on startup, then re-check every interval."""
+    await asyncio.sleep(2)  # let the server finish starting
 
     while True:
-        await _ingest_new_gcs_pdfs()
+        await _ingest_new_gcs_documents()
         await asyncio.sleep(settings.gcs_poll_interval)
 
 
-async def _ingest_new_gcs_pdfs() -> None:
-    """Check GCS for PDFs not yet in Qdrant and ingest them."""
+async def _ingest_new_gcs_documents() -> None:
+    """
+    Check GCS for any new content not yet in Qdrant and ingest it.
+
+    Three source types are handled in order:
+      1. PDFs / Excel files  → text extraction via pdfplumber / pandas
+      2. JSON table files    → embed the pre-written 'text' field per record
+      3. Images              → GPT-4o Vision captions, then embed
+    """
     try:
         qdrant_service, _, _, ingestion_pipeline = _get_services()
 
-        # _get_services() lazily inits _gcs_service; import it after the call
         from backend.api.routes import _gcs_service
         if _gcs_service is None:
             return
 
-        pdf_list = _gcs_service.list_pdfs()
-        new_pdfs = [
-            p for p in pdf_list
-            if not qdrant_service.check_document_exists(p["document_name"])
-        ]
+        # ── 1. PDF files ─────────────────────────────────────────────────────
+        _PDF_SUBFOLDER = "Pdf files"
+        try:
+            pdf_files = _gcs_service.list_pdf_files(_PDF_SUBFOLDER)
+        except Exception as exc:
+            logger.warning("Could not list PDF files from GCS: %s", exc)
+            pdf_files = []
 
-        if not new_pdfs:
-            logger.debug("GCS poll: no new PDFs found.")
-            return
-
-        logger.info("GCS poll: found %d new PDF(s) to ingest.", len(new_pdfs))
-        for pdf in new_pdfs:
+        for doc_info in pdf_files:
+            doc_name  = doc_info["name_stem"]
+            blob_name = doc_info["blob_name"]
+            if qdrant_service.check_document_exists(doc_name):
+                logger.debug("GCS poll: '%s' already indexed — skipping.", doc_name)
+                continue
             try:
                 result = await ingestion_pipeline.process_pdf_from_gcs(
-                    blob_name=pdf["blob_name"],
-                    document_name=pdf["document_name"],
+                    blob_name=blob_name, document_name=doc_name,
                 )
                 logger.info(
-                    "Auto-ingested '%s': %d chunks from %d page(s).",
-                    result["document_name"],
-                    result["total_chunks"],
-                    result["pages"],
+                    "Auto-ingested PDF '%s': %d chunks.",
+                    doc_name, result["total_chunks"],
                 )
             except Exception as exc:
-                logger.error("Auto-ingest failed for '%s': %s", pdf["document_name"], exc)
+                logger.error("Auto-ingest failed for PDF '%s': %s", doc_name, exc)
+
+        # ── 2. JSON table files ──────────────────────────────────────────────
+        _JSON_SUBFOLDER = "Cf761-Tables"
+        try:
+            json_files = _gcs_service.list_json_files(_JSON_SUBFOLDER)
+        except Exception as exc:
+            logger.warning("Could not list JSON files from GCS: %s", exc)
+            json_files = []
+
+        for file_info in json_files:
+            doc_name = file_info["name_stem"]   # e.g. "Installation Guidelines"
+            if qdrant_service.check_document_exists(doc_name):
+                logger.debug("GCS poll: JSON '%s' already indexed — skipping.", doc_name)
+                continue
+            try:
+                result = await ingestion_pipeline.process_json_from_gcs(
+                    blob_name=file_info["blob_name"],
+                    document_name=doc_name,
+                )
+                logger.info(
+                    "Auto-ingested JSON '%s': %d records.",
+                    doc_name, result["total_chunks"],
+                )
+            except Exception as exc:
+                logger.error("Auto-ingest failed for JSON '%s': %s", doc_name, exc)
+
+        # ── 3. Images (GPT-4o Vision captioning) ─────────────────────────────
+        _IMAGE_SUBFOLDER = "CF761-Images"
+        _IMAGE_DOC_KEY   = "CF761-images"       # sentinel used to track in Qdrant
+
+        if not qdrant_service.check_document_exists(_IMAGE_DOC_KEY):
+            try:
+                img_list = _gcs_service.list_image_files(_IMAGE_SUBFOLDER)
+            except Exception as exc:
+                logger.warning("Could not list image files from GCS: %s", exc)
+                img_list = []
+
+            if img_list:
+                try:
+                    result = await ingestion_pipeline.process_images_from_gcs(
+                        subfolder=_IMAGE_SUBFOLDER,
+                        document_name=_IMAGE_DOC_KEY,
+                    )
+                    logger.info(
+                        "Auto-ingested %d image caption(s) for '%s'.",
+                        result["total_chunks"], _IMAGE_DOC_KEY,
+                    )
+                except Exception as exc:
+                    logger.error("Auto-ingest failed for images: %s", exc)
+        else:
+            logger.debug("GCS poll: images already indexed — skipping.")
 
     except Exception as exc:
         logger.error("GCS poll error: %s", exc)
+
 
 
 def _log_startup_banner() -> None:

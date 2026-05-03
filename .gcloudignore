@@ -1,6 +1,8 @@
+#.gcloudignore
 # Secrets — never upload to Cloud Build
 .env
 .env.*
+cloudrun.env.yaml
 
 # Virtual environment
 .venv/
